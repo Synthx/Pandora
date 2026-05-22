@@ -2,24 +2,27 @@ package login
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
-	login_message "pandora/login/message"
+	"pandora/internal/login/message"
 	"sync"
 
 	"go.uber.org/zap"
 )
 
 type Server struct {
-	port     int
-	listener *net.TCPListener
-	clients  map[string]*Client
-	log      *zap.Logger
-	mutex    sync.Mutex
-	wg       sync.WaitGroup
+	port       int
+	listener   *net.TCPListener
+	clients    map[string]*Client
+	dispatcher *MessageDispatcher
+	log        *zap.Logger
+	mutex      sync.Mutex
+	wg         sync.WaitGroup
 }
 
-func NewServer(port int, logger *zap.Logger) (*Server, error) {
+func NewServer(port int, logger *zap.Logger, dispatcher *MessageDispatcher) (*Server, error) {
 	addr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, err
@@ -31,10 +34,11 @@ func NewServer(port int, logger *zap.Logger) (*Server, error) {
 	}
 
 	server := &Server{
-		port:     port,
-		listener: listener,
-		clients:  make(map[string]*Client),
-		log:      logger.Named("login_server"),
+		port:       port,
+		listener:   listener,
+		clients:    make(map[string]*Client),
+		dispatcher: dispatcher,
+		log:        logger.Named("server"),
 	}
 
 	return server, nil
@@ -69,7 +73,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		go func() {
 			defer s.wg.Done()
 			err := s.handleConnection(ctx, conn)
-			if err != nil {
+			if err != nil && !errors.Is(err, io.EOF) {
 				s.log.Error("Error handling connection", zap.Error(err))
 			}
 		}()
@@ -89,20 +93,19 @@ func (s *Server) removeClient(client *Client) {
 }
 
 func (s *Server) handleConnection(ctx context.Context, conn *net.TCPConn) error {
-	client, err := NewClient(conn, s.log)
+	client, err := NewClient(conn, s.log, s.dispatcher)
 	if err != nil {
 		return err
 	}
 
 	defer func() {
-		s.removeClient(client)
 		client.Close()
+		s.removeClient(client)
 	}()
 
 	s.addClient(client)
 
-	message := login_message.NewHelloConnectMessage(client.Salt)
-	err = client.Send(message)
+	err = client.Send(message.NewHelloConnectMessage(client.Salt))
 	if err != nil {
 		return err
 	}
